@@ -1,10 +1,34 @@
 import type { AuthResponse, User } from '../types';
 
-const STORAGE_KEY_URL = 'hokage_gas_url';
+const STORAGE_KEY_URL  = 'hokage_gas_url';
 const STORAGE_KEY_USER = 'hokage_auth_user';
 
+// ============================================================
+// 🔐 MÃ HÓA MẬT KHẨU SHA-256 (Web Crypto API - phía client)
+// ============================================================
+
+/**
+ * Tính SHA-256 hash của một chuỗi văn bản, trả về chuỗi hex chữ thường.
+ * Mật khẩu gốc KHÔNG BAO GIỜ được gửi lên server.
+ */
+export const hashPasswordSHA256 = async (plainText: string): Promise<string> => {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(plainText);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+};
+
+// ============================================================
+// 🗄️ PERSISTENCE (localStorage)
+// ============================================================
+
 export const getSavedScriptUrl = (): string => {
-  return 'https://script.google.com/macros/s/AKfycbx1vue6a_P-IEOUj4s4AyndZmGuXLAybcl7NFJUVBA69w3AmQS-lkpX0tWwV9gL_PGT/exec';
+  return (
+    localStorage.getItem(STORAGE_KEY_URL) ||
+    (import.meta.env.VITE_GOOGLE_APPS_SCRIPT_URL as string) ||
+    ''
+  );
 };
 
 export const saveScriptUrl = (url: string): void => {
@@ -15,7 +39,7 @@ export const getSavedUser = (): User | null => {
   const data = localStorage.getItem(STORAGE_KEY_USER);
   if (!data) return null;
   try {
-    return JSON.parse(data);
+    return JSON.parse(data) as User;
   } catch {
     return null;
   }
@@ -29,10 +53,16 @@ export const saveUser = (user: User | null): void => {
   }
 };
 
+// ============================================================
+// 📡 KIỂM TRA KẾT NỐI
+// ============================================================
+
 /**
- * Kiểm tra kết nối tới Google Apps Script URL
+ * Kiểm tra kết nối tới Google Apps Script URL bằng cách gọi action ping.
  */
-export const testGoogleScriptConnection = async (url: string): Promise<{ success: boolean; message: string; latency?: number }> => {
+export const testGoogleScriptConnection = async (
+  url: string
+): Promise<{ success: boolean; message: string; latency?: number }> => {
   if (!url || !url.startsWith('https://script.google.com/macros/s/')) {
     return {
       success: false,
@@ -42,18 +72,17 @@ export const testGoogleScriptConnection = async (url: string): Promise<{ success
 
   const startTime = Date.now();
   try {
-    // Gọi action ping qua GET
     const pingUrl = `${url}${url.includes('?') ? '&' : '?'}action=ping&_t=${Date.now()}`;
     const response = await fetch(pingUrl, {
       method: 'GET',
       mode: 'cors',
-      credentials: 'omit',
+      credentials: 'omit'
     });
 
     const latency = Date.now() - startTime;
     const data = await response.json();
 
-    if (data && data.success) {
+    if (data?.success) {
       return {
         success: true,
         message: data.message || 'Kết nối thành công tới Google Apps Script!',
@@ -69,13 +98,19 @@ export const testGoogleScriptConnection = async (url: string): Promise<{ success
     const errorMsg = err instanceof Error ? err.message : String(err);
     return {
       success: false,
-      message: `Không thể kết nối (${errorMsg}). Hãy đảm bảo bạn đã chọn "Anyone" khi Deploy Web App.`
+      message: `Không thể kết nối (${errorMsg}). Đảm bảo bạn đã chọn "Anyone" khi Deploy Web App.`
     };
   }
 };
 
+// ============================================================
+// 🔑 ĐĂNG NHẬP
+// ============================================================
+
 /**
- * Đăng nhập qua Google Apps Script Web App
+ * Đăng nhập qua Google Apps Script Web App.
+ * Mật khẩu được HASH SHA-256 ngay tại client trước khi gửi —
+ * server chỉ nhận và so sánh hash, không bao giờ thấy mật khẩu gốc.
  */
 export const loginWithGoogleScript = async (
   username: string,
@@ -84,31 +119,38 @@ export const loginWithGoogleScript = async (
 ): Promise<AuthResponse> => {
   const url = (customUrl || getSavedScriptUrl()).trim();
 
-  // Nếu người dùng chưa cấu hình URL Google Script, dùng mock dữ liệu mẫu để trải nghiệm trước
+  // Tính hash ngay tại client trước khi gửi bất kỳ request nào
+  const passwordHash = await hashPasswordSHA256(password);
+
+  // Nếu chưa cấu hình URL → chế độ Demo offline (so sánh với hash cố định)
   if (!url) {
-    await new Promise((resolve) => setTimeout(resolve, 800)); // Hiệu ứng delay giả lập mạng
-    if (username.toLowerCase() === 'admin' && password === 'admin123') {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    const adminHash  = await hashPasswordSHA256('admin123');
+    const memberHash = await hashPasswordSHA256('user123');
+
+    if (username.toLowerCase() === 'admin' && passwordHash === adminHash) {
       return {
         success: true,
-        message: 'Đăng nhập thành công (Chế độ giả lập Demo)',
+        message: 'Đăng nhập thành công (Chế độ Demo)',
         user: {
-          id: 'USR_DEMO_01',
-          username: 'admin',
-          fullName: 'Administrator (Demo)',
-          role: 'admin',
+          id:        'USR_DEMO_01',
+          username:  'admin',
+          fullName:  'Administrator (Demo)',
+          role:      'admin',
           lastLogin: new Date().toISOString()
         }
       };
     }
-    if (username.toLowerCase() === 'user' && password === 'user123') {
+    if (username.toLowerCase() === 'user' && passwordHash === memberHash) {
       return {
         success: true,
-        message: 'Đăng nhập thành công (Chế độ giả lập Demo)',
+        message: 'Đăng nhập thành công (Chế độ Demo)',
         user: {
-          id: 'USR_DEMO_02',
-          username: 'user',
-          fullName: 'Thành viên thử nghiệm (Demo)',
-          role: 'user',
+          id:        'USR_DEMO_02',
+          username:  'user',
+          fullName:  'Thành viên thử nghiệm (Demo)',
+          role:      'user',
           lastLogin: new Date().toISOString()
         }
       };
@@ -119,29 +161,27 @@ export const loginWithGoogleScript = async (
     };
   }
 
-  // Gửi request POST tới Google Apps Script
-  // QUAN TRỌNG: Sử dụng 'text/plain;charset=utf-8' để Google Apps Script không bị lỗi preflight CORS OPTIONS!
+  // Gửi hash (KHÔNG gửi plaintext) tới Google Apps Script
+  // Dùng Content-Type: text/plain để tránh lỗi CORS preflight OPTIONS
   try {
     const payload = {
-      action: 'login',
-      username,
-      password
+      action:       'login',
+      username:     username.trim(),
+      passwordHash              // ← chỉ gửi hash
     };
 
     const response = await fetch(url, {
-      method: 'POST',
-      mode: 'cors',
-      headers: {
-        'Content-Type': 'text/plain;charset=utf-8'
-      },
-      body: JSON.stringify(payload)
+      method:  'POST',
+      mode:    'cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body:    JSON.stringify(payload)
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      throw new Error(`HTTP ${response.status}`);
     }
 
-    const result: AuthResponse = await response.json();
+    const result = await response.json() as AuthResponse;
     return result;
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
